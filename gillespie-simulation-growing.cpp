@@ -1,10 +1,11 @@
-// gillespie-simulation.cpp
+// gillespie-simulation-growing.cpp
 // Author: Peter Ashcroft, ETH Zürich 
 
 // Stochastic simulation algorithm (SSA) [Gillespie, J Stat Phys, (1977)]
 // for invetsigating clonal expansion of hematopoietic stem cells
 // which exist in two anatomical compartments.
-// We record time to reach specified levels of clonality
+// We record time to reach 4% clonality, and simulate the expansion of
+// the hematopoietic system during maturation 
 // Designed for use on a HPC cluster
 
 #include <cmath>
@@ -24,7 +25,7 @@ class GillespieAlgorithm
 private:
   // System parameters
   unsigned nReactions;       // Number of reaction channels
-  unsigned N;                // System size parameter
+  unsigned N;                // System size parameter (carrying capacity for total # niches)
   unsigned sStar,nStar;      // Neutral equilibrium parameters
   unsigned S2;               // Initial dose of donor cells
   double lt;                 // Lifetime of a cell in PB
@@ -33,6 +34,7 @@ private:
   double beta,delta,a,d,alpha;                    // Neutral reaction parameters
   double gBeta,gDelta,gA,gD,epsilon;              // Selective reaction parameters
   double beta1,beta2,delta1,delta2,a1,a2,d1,d2;   // Full reaction parameters
+  double rNiche;                                  // Niche expansion rate
   
     
   // Analysis paramters
@@ -45,7 +47,7 @@ private:
 public:
   // Constructor (Empty)
   GillespieAlgorithm()
-    : paramIndex(0), simIndex(0), nRuns(1), nReactions(10)
+    : paramIndex(0), simIndex(0), nRuns(1), nReactions(11)
   {  
     seeds.resize(nRuns);                                                    // Resize seed vector
     sprintf(Filename, "output_%02i_%03i.dat", paramIndex, simIndex);        // Define filename
@@ -53,7 +55,7 @@ public:
 
   // Constructor
   GillespieAlgorithm(unsigned& paramIndex_, unsigned& simIndex_, unsigned& nRuns_)
-    : paramIndex(paramIndex_), simIndex(simIndex_), nRuns(nRuns_), nReactions(10)
+    : paramIndex(paramIndex_), simIndex(simIndex_), nRuns(nRuns_), nReactions(11)
   {
     seeds.resize(nRuns);                                                    // Resize seed vector
     sprintf(Filename, "output_%02i_%03i.dat", paramIndex, simIndex);          // Define filename
@@ -88,23 +90,26 @@ void GillespieAlgorithm::initialise_seeds()
 // Assign model parameters
 void GillespieAlgorithm::set_parameters()
 {
-  N = 10000;                                // System parameters
-  sStar = 10;
+  N = 10000 * pow(10,paramIndex);           // System parameters
+  sStar = floor(0.01 * (double)N);
   nStar = 9900;
-  lt = 3.0/1440.0;
-  S2 = 1 * pow(2,paramIndex);               // Here we use paramIndex to vary the dose of donor cells
+  lt = 60.0/1440.0;
+  S2 = 1;                                   // Here we use paramIndex to vary the dose of donor cells
   alpha = 0.0;                              // No death allowed in the bone marrow niches
+
+  rNiche = 0.3 / 365.25;
   
-  beta = 1.0/39.0;                          // Neutral parameters
+  
+  beta = 1.0/(7.0 * 40.0);                          // Neutral parameters
   delta = beta * (double)nStar / ( (double)sStar + alpha * (double)nStar );
   d = ( ( ( 1.0 / lt ) * (double)sStar ) / (double)nStar ) - beta;
-  a = ( ( 1.0 / lt ) - ( ( beta * (double)nStar ) / ( (double)sStar + alpha *(double)nStar) ) ) * ( (double)N / ( (double)N - (double)nStar ) );
+  a = ( ( 1.0 / lt ) - ( ( beta * (double)nStar ) / ( (double)sStar + alpha * (double)nStar) ) ) * ( (double)N / ( (double)N - (double)nStar ) );
 
   gBeta = 1.0;                              // Selective parameters: Only change reproductive rate beta
   gA = 0.0;
   gDelta = 0.0;
   gD = 0.0;
-  epsilon = 0.5;                            // epsilon = 0 gives the neutral model
+  epsilon = 0.0;                            // epsilon = 0 gives the neutral model
 
   beta1 = beta;                             // Reaction parameters: Host
   a1 = a;
@@ -140,7 +145,7 @@ void GillespieAlgorithm::output_parameters()
 
 // Propensity functions for all possible reactions
 double GillespieAlgorithm::propensity_functions(unsigned& reaction, vector<unsigned>& x)
-{ // x=(s1,s2,n1,n2)
+{ // x=(s1,s2,n1,n2,N)
   switch(reaction)
     {
     case 0 : // n1 -> n1+s1
@@ -168,11 +173,11 @@ double GillespieAlgorithm::propensity_functions(unsigned& reaction, vector<unsig
       break;
 
     case 6 : // s1+(N-n1-n2) -> n1
-      return a1 * (double)x[0] * ( ( (double)N - (double)x[2] - (double)x[3] ) / (double)N );
+      return a1 * (double)x[0] * ( ( (double)x[4] - (double)x[2] - (double)x[3] ) / (double)x[4] );
       break;
 
     case 7 : // s2+(N-n1-n2) -> n2
-      return a2 * (double)x[1] * ( ( (double)N - (double)x[2] - (double)x[3] ) / (double)N );
+      return a2 * (double)x[1] * ( ( (double)x[4] - (double)x[2] - (double)x[3] ) / (double)x[4] );
       break;
 
     case 8 : // n1 -> 0
@@ -181,6 +186,10 @@ double GillespieAlgorithm::propensity_functions(unsigned& reaction, vector<unsig
 
     case 9 : // n2 -> 0
       return alpha * delta2 * (double)x[3];
+      break;
+
+    case 10 : // N -> N+1
+      return rNiche * (double)x[4] * ( 1.0 - (double)x[4]/(double)N );
       break;
       
     default :
@@ -192,7 +201,7 @@ double GillespieAlgorithm::propensity_functions(unsigned& reaction, vector<unsig
 
 // Population update for all possible reactions
 void GillespieAlgorithm::population_update(unsigned& reaction, vector<unsigned>& x)
-{ // x=(s1,s2,n1,n2)
+{ // x=(s1,s2,n1,n2,N)
   switch(reaction)
     {   
     case 0 : // n1 -> n1+s1
@@ -234,6 +243,10 @@ void GillespieAlgorithm::population_update(unsigned& reaction, vector<unsigned>&
     case 9 : // n2 -> 0
       x[3]--;
       break;
+
+    case 10 : // N -> N+1
+      x[4]++;
+      break;
       
     default :
       x[0]++;x[0]--;
@@ -254,45 +267,24 @@ void GillespieAlgorithm::compute(unsigned runIndex)
   double aa0;                                         // Propensity sum
  
   long double t;                                      // Time storage (long double because long time...)
-  vector<unsigned> x(4);                              // Population storage vector: x=(s1,s2,n1,n2)
-  unsigned y;                                         // y=min[(s1+n1),(s2+n2)]: used to test for fixation
+  vector<unsigned> x(5);                              // Population storage vector: x=(s1,s2,n1,n2,N)
+  unsigned y;                                         // y=min[(s1+n1),(s2+n2)]: used to test for fixation/extinction
 
   vector<double> r(2);                                // Variables to store random numbers, time step and fired reaction
   double tau,sum;
   unsigned mu;
 
-  // Sampling parameters
-  double deltaC = 1.;          // Frequency of sampling (log)                                                                                                                  
-  double minC = -3.;           // Minimum chimerism to sample (log)
-  unsigned nSample = 4;        // Number of chimerims smaple points (0-min)/delta + 1
-
-  double chimerism;                                   // BM chimerism of donor cells                                                                            
-  vector<long double> chimerismTime(nSample);         // Time to reach each chimerism level                                                              
-  unsigned chimerismCount;                            // Counter
+  double chimerism;                                   // BM chimerism of donor cells
   
-
   // Initial condition
-  t = 0.0;                                            
-  x[0] = sStar;x[1] = S2;
-  x[2] = nStar;x[3] = 0;
+  t = 0.0;
+  x[4] = floor( 0.05 * (double)N); // Start at 1/20th of the size
+  x[0] = floor( (double)sStar * (double)x[4] / (double)N ); x[1] = S2;
+  x[2] = floor( (double)nStar * (double)x[4] / (double)N ); x[3] = 0;
   y = min( x[0]+x[2] , x[1]+x[3] );
   chimerism = (double)x[3] / ((double)x[2] + (double)x[3]);
-  chimerismCount = 0;
-
-  // Check if already past chimerism levels                                                                                                                     
-  while( chimerism >= pow(10., minC + deltaC * (double)chimerismCount ) )
-    {
-      chimerismTime[chimerismCount] = t;
-      ++chimerismCount;
-    }
-
-
-  // Algorithm
-
-  // while ( x[1]+x[3] > 0 && x[3] < 100 )            // Loop until n_2 reaches 100 or extinction:
-                                                      // this is used for engraftment in preconditioned hosts.
   
-  while( y > 0 )                                      // Loop over timesteps until fixation
+  while( y > 0 && chimerism < 0.04)                                      // Loop over timesteps until fixation
     {      
       r[0] = dist(mt_rand); r[1] = dist(mt_rand);     // Generate 2 uniform random numbers in (0,1]
       
@@ -302,7 +294,6 @@ void GillespieAlgorithm::compute(unsigned runIndex)
 	  aa[m] = propensity_functions(m,x);
 	  aa0 += aa[m];
 	}
-       
       tau = (1.0/aa0) * log(1.0/r[0]);                // Calculate time step
 
       sum = 0.0;                                      // Determine which reaction channel has fired
@@ -315,13 +306,6 @@ void GillespieAlgorithm::compute(unsigned runIndex)
      population_update(mu,x); t += tau;               // Update population and time
 
      chimerism = (double)x[3] / ((double)x[2] + (double)x[3]);
-
-     // Sample chimerism level and store to vector
-     while( chimerism >= pow(10., minC + deltaC * (double)chimerismCount ) )
-       {
-         chimerismTime[chimerismCount] = t;
-         ++chimerismCount;
-       }
      
      y = min( x[0]+x[2] , x[1]+x[3] );
     }// End of loop over timesteps
@@ -331,10 +315,7 @@ void GillespieAlgorithm::compute(unsigned runIndex)
   Output.open(Filename,ios::app);                     // Append to file after each run
   // Choice of output
   // Output system state at fixation
-  //Output << t << "\t" << x[0] << "\t" << x[1] << "\t" << x[2] << "\t" << x[3] << endl;
-  // Or output times at which clonality levels are reached
-  for(unsigned i = 0; i < nSample; ++i) Output << chimerismTime[i] << "\t";
-  Output << endl;
+  Output << t << "\t" << x[0] << "\t" << x[1] << "\t" << x[2] << "\t" << x[3] << "\t" << x[4] << endl;
   Output.close(); // Close output file
 
 }// End of GillespieAlgorithm::compute()
