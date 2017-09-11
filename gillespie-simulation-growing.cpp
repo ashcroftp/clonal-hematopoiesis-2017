@@ -92,7 +92,7 @@ void GillespieAlgorithm::set_parameters()
 {
   N = 10000 * pow(10,paramIndex);           // System parameters
   sStar = floor(0.01 * (double)N);
-  nStar = 9900;
+  nStar = floor(0.99 * (double)N);
   lt = 60.0/1440.0;
   S2 = 1;                                   // Here we use paramIndex to vary the dose of donor cells
   alpha = 0.0;                              // No death allowed in the bone marrow niches
